@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: ekart-hub-dashboard
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120
+    disk:
+      name: data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
+    envVars:
+      - key: OWNER_PASSWORD
+        value: ekart2024
+      - key: SECRET_KEY
+        generateValue: true
