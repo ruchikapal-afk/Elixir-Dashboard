@@ -363,12 +363,6 @@ select.hsel:focus{outline:none;border-color:var(--blue)}
     <div id="o-login-sec">
       <h3>&#9881; Dashboard Settings</h3>
 
-      <!-- Viewer: connect to live data -->
-      <div class="o-small">&#127760; <strong>Connect to live data</strong> — paste the Script URL shared by the owner:</div>
-      <input id="o-binid-viewer" type="hidden">
-      <button class="o-btn" onclick="saveBinId()">Connect to Live Data</button>
-      <div class="o-status" id="o-viewer-st"></div>
-
       <hr class="o-divider">
 
       <!-- Owner login -->
@@ -774,6 +768,7 @@ function checkOwner(){
   const stored = localStorage.getItem('ekart_owner_pass') || 'ekart2024';
   if(pwd === stored){
     isOwner = true;
+    sessionStorage.setItem('ekart_pwd', pwd);
     document.getElementById('o-login-sec').style.display='none';
     document.getElementById('o-main-sec').style.display='block';
     setSt('o-st','','');
@@ -801,7 +796,8 @@ async function doUpload(file){
   try {
     const fd = new FormData();
     fd.append('file', file);
-    const res = await fetch('/api/upload', {method:'POST', body:fd});
+    const pwd = sessionStorage.getItem('ekart_pwd')||'';
+    const res = await fetch('/api/upload', {method:'POST',body:fd,headers:{'X-Owner-Key':pwd}});
     const j = await res.json();
     if(j.ok){
       if(j.updated_at) document.getElementById('hdr-updated').textContent='Live: '+j.updated_at;
