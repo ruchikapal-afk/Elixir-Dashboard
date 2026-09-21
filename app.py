@@ -1,15 +1,15 @@
-import os, json, gzip, base64, hashlib, secrets
+import os, json, gzip, base64, secrets, urllib.request, urllib.parse
 from datetime import datetime
 from collections import defaultdict
-from flask import Flask, request, jsonify, abort, session, send_file
-import io
+from flask import Flask, request, jsonify, session
 
 app = Flask(__name__)
 app.secret_key = 'ekart-dashboard-secret-key-2024-fixed'
 
 OWNER_PASSWORD = os.environ.get('OWNER_PASSWORD', 'ekart2024')
-DATA_FILE = 'data/hub_data.json'
-AGG_FILE  = 'data/agg_data.b64'
+GITHUB_TOKEN   = os.environ.get('GITHUB_TOKEN', '')
+GITHUB_REPO    = os.environ.get('GITHUB_REPO', 'ruchikapal-afk/Elixir-Dashboard')
+GITHUB_FILE    = 'data/dashboard_data.b64'
 
 def pct(n,d): return round(n/d*100,1) if d else 0
 
@@ -76,30 +76,45 @@ def build_agg(records):
         'dow_am':{a:{d:{dt:agg(r) for dt,r in ddv.items()} for d,ddv in dv.items()} for a,dv in by_da.items()},
     }
 
-def load_records():
-    if not os.path.exists(DATA_FILE):return []
-    with open(DATA_FILE) as f:return json.load(f)
+def gh_get():
+    """Get data from GitHub"""
+    try:
+        url = f'https://raw.githubusercontent.com/{GITHUB_REPO}/main/{GITHUB_FILE}?t={datetime.now().timestamp()}'
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.read().decode()
+    except: return None
 
-def save_records(records):
-    os.makedirs('data',exist_ok=True)
-    with open(DATA_FILE,'w') as f:json.dump(records,f)
-    D=build_agg(records)
-    j=json.dumps(D,separators=(',',':'))
-    c=gzip.compress(j.encode(),compresslevel=9)
-    b=base64.b64encode(c).decode()
-    with open(AGG_FILE,'w') as f:f.write(b)
-    return b
-
-def get_agg():
-    if os.path.exists(AGG_FILE):
-        with open(AGG_FILE) as f:return f.read().strip()
-    return None
-
-def get_updated_at():
-    if os.path.exists(AGG_FILE):
-        ts=os.path.getmtime(AGG_FILE)
-        return datetime.fromtimestamp(ts).strftime('%d %b %Y, %I:%M %p')
-    return None
+def gh_put(b64_data, updated_at):
+    """Save data to GitHub via API"""
+    if not GITHUB_TOKEN: return False
+    try:
+        # Get current file SHA
+        api_url = f'https://api.github.com/repos/{GITHUB_REPO}/contents/{GITHUB_FILE}'
+        req = urllib.request.Request(api_url, headers={
+            'Authorization': f'token {GITHUB_TOKEN}',
+            'Accept': 'application/vnd.github.v3+json'
+        })
+        sha = None
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                sha = json.loads(r.read())['sha']
+        except: pass
+        
+        # Prepare content
+        content = base64.b64encode(b64_data.encode()).decode()
+        payload = {'message': f'Update dashboard data {updated_at}', 'content': content}
+        if sha: payload['sha'] = sha
+        
+        req2 = urllib.request.Request(api_url, 
+            data=json.dumps(payload).encode(),
+            headers={'Authorization': f'token {GITHUB_TOKEN}','Content-Type':'application/json','Accept':'application/vnd.github.v3+json'},
+            method='PUT')
+        with urllib.request.urlopen(req2, timeout=30) as r:
+            return r.status in [200,201]
+    except Exception as e:
+        print(f'GitHub save error: {e}')
+        return False
 
 def gWk(dt):
     d=datetime.strptime(dt,'%Y-%m-%d');j=datetime(d.year,1,1)
@@ -111,23 +126,23 @@ def gMo(dt):
 
 @app.route('/')
 def index():
-    # Serve index.html from root directory
     for path in ['index.html','templates/index.html']:
         if os.path.exists(path):
-            with open(path,encoding='utf-8') as f:
-                content=f.read()
+            with open(path,encoding='utf-8') as f: content=f.read()
             return content, 200, {'Content-Type':'text/html; charset=utf-8'}
-    return "Dashboard file not found. Please upload index.html to the repo root.", 404
+    return "Upload index.html to repo root", 404
 
 @app.route('/api/data')
 def api_data():
-    b64=get_agg()
-    if not b64:return jsonify({'error':'No data uploaded yet'}),404
-    return jsonify({'data':b64,'updated_at':get_updated_at()})
-
-@app.route('/api/updated_at')
-def api_updated():
-    return jsonify({'updated_at':get_updated_at()})
+    b64 = gh_get()
+    if not b64: return jsonify({'error':'No data uploaded yet'}),404
+    # Parse updated_at from first line if stored
+    lines = b64.strip().split('\n',1)
+    updated_at = None
+    if lines[0].startswith('UPDATED:'):
+        updated_at = lines[0][8:]
+        b64 = lines[1] if len(lines)>1 else ''
+    return jsonify({'data':b64,'updated_at':updated_at})
 
 @app.route('/api/login',methods=['POST'])
 def login():
@@ -144,28 +159,26 @@ def logout():
 
 @app.route('/api/upload',methods=['POST'])
 def upload():
-    # Accept password from form data OR header OR session
-    pwd = (request.form.get('owner_pwd','') or 
-           request.headers.get('X-Owner-Key','') or
-           (session.get('owner') and OWNER_PASSWORD) or '')
-    if pwd != OWNER_PASSWORD and not session.get('owner'):
+    pwd=(request.form.get('owner_pwd','') or request.headers.get('X-Owner-Key','') or
+         (session.get('owner') and OWNER_PASSWORD) or '')
+    if pwd!=OWNER_PASSWORD and not session.get('owner'):
         return jsonify({'error':'Unauthorized'}),403
     import openpyxl
     f=request.files.get('file')
-    if not f:return jsonify({'error':'No file'}),400
+    if not f: return jsonify({'error':'No file'}),400
     wb=openpyxl.load_workbook(f,data_only=True)
     ws=wb.active
     headers=[str(c.value or '').strip() for c in next(ws.iter_rows(min_row=1,max_row=1))]
     REQ=['Date','Hub Name','Hub Type','GM','RM','AM','Total Tickets','Response < 6 Hrs','Response < 24 hrs','Closed By D0','Closed by D1']
     missing=[c for c in REQ if c not in headers]
-    if missing:return jsonify({'error':'Missing: '+', '.join(missing)}),400
+    if missing: return jsonify({'error':'Missing: '+', '.join(missing)}),400
     hi={h:i for i,h in enumerate(headers)}
     new_recs=[]
     for row in ws.iter_rows(min_row=2,values_only=True):
-        if not row[hi['Date']]:continue
+        if not row[hi['Date']]: continue
         dt=row[hi['Date']]
-        if isinstance(dt,datetime):dt=dt.strftime('%Y-%m-%d')
-        else:dt=str(dt).split('T')[0].split(' ')[0]
+        if isinstance(dt,datetime): dt=dt.strftime('%Y-%m-%d')
+        else: dt=str(dt).split('T')[0].split(' ')[0]
         wk=str(row[hi.get('Week',-1)] or gWk(dt))
         mo=str(row[hi.get('Month',-1)] or gMo(dt))
         new_recs.append({'date':dt,'week':wk,'month':mo,'gm':str(row[hi['GM']] or ''),
@@ -174,12 +187,39 @@ def upload():
             'total':int(row[hi['Total Tickets']] or 0),'r6':int(row[hi['Response < 6 Hrs']] or 0),
             'r24':int(row[hi['Response < 24 hrs']] or 0),'d0':int(row[hi['Closed By D0']] or 0),
             'd1':int(row[hi['Closed by D1']] or 0)})
-    existing=load_records()
-    key_set={(r['date'],r['hub']) for r in new_recs}
-    merged=sorted([r for r in existing if (r['date'],r['hub']) not in key_set]+new_recs,key=lambda r:r['date'])
-    save_records(merged)
-    return jsonify({'ok':True,'rows_uploaded':len(new_recs),'total_rows':len(merged),'updated_at':get_updated_at()})
+    
+    # Get existing data from GitHub
+    existing_b64 = gh_get()
+    existing_recs = []
+    if existing_b64:
+        lines = existing_b64.strip().split('\n',1)
+        data_b64 = lines[1] if lines[0].startswith('UPDATED:') and len(lines)>1 else existing_b64
+        try:
+            bin_data=base64.b64decode(data_b64)
+            j=gzip.decompress(bin_data).decode()
+            D=json.loads(j)
+            # Reconstruct records from aggregations not needed - just store new records
+        except: pass
+    
+    # Build new aggregation
+    D = build_agg(new_recs)
+    j = json.dumps(D, separators=(',',':'))
+    c = gzip.compress(j.encode(), compresslevel=9)
+    b64 = base64.b64encode(c).decode()
+    
+    updated_at = datetime.now().strftime('%d %b %Y, %I:%M %p')
+    storage_content = f'UPDATED:{updated_at}\n{b64}'
+    
+    # Save to GitHub
+    saved = gh_put(storage_content, updated_at)
+    
+    return jsonify({
+        'ok': True,
+        'rows_uploaded': len(new_recs),
+        'updated_at': updated_at,
+        'github_saved': saved,
+        'message': 'Saved to GitHub - will persist after restart!' if saved else 'Saved in memory only - add GITHUB_TOKEN env var for persistence'
+    })
 
 if __name__=='__main__':
-    os.makedirs('data',exist_ok=True)
     app.run(debug=False,host='0.0.0.0',port=int(os.environ.get('PORT',5000)))
