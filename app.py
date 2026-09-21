@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify, abort, session, send_file
 import io
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
+app.secret_key = os.environ.get('SECRET_KEY', 'ekart-dashboard-secret-key-2024-fixed')
 
 OWNER_PASSWORD = os.environ.get('OWNER_PASSWORD', 'ekart2024')
 DATA_FILE = 'data/hub_data.json'
@@ -144,7 +144,9 @@ def logout():
 
 @app.route('/api/upload',methods=['POST'])
 def upload():
-    if not session.get('owner'):
+    # Check password directly (session-free auth)
+    pwd = request.headers.get('X-Owner-Key','')
+    if pwd != OWNER_PASSWORD:
         return jsonify({'error':'Unauthorized'}),403
     import openpyxl
     f=request.files.get('file')
@@ -179,4 +181,3 @@ def upload():
 if __name__=='__main__':
     os.makedirs('data',exist_ok=True)
     app.run(debug=False,host='0.0.0.0',port=int(os.environ.get('PORT',5000)))
-
